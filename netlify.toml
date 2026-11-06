@@ -1,0 +1,17 @@
+[build]
+command = "if [ \"$CONTEXT\" = production ]; then node scripts/check-netlify-release.mjs || exit 1; fi; pnpm build && if [ \"$CONTEXT\" = production ]; then pnpm migrate:production; fi"
+publish = "dist"
+functions = ".netlify/functions-internal"
+
+[build.environment]
+NODE_VERSION = "22"
+NITRO_PRESET = "netlify"
+NPM_CONFIG_PRODUCTION = "false"
+
+[context.production.environment]
+AGENT_NATIVE_HOSTED_HARNESS = "true"
+AGENT_NATIVE_DISABLE_KEEP_WARM_BACKGROUND = "1"
+AUTH_DISABLED = "false"
+# Production release migrations own schema setup; request functions must skip
+# migration probes on every serverless invocation.
+AGENT_NATIVE_RELEASE_MIGRATIONS = "1"

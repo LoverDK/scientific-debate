@@ -1,0 +1,11 @@
+{
+  "name": "Scientific Debate",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "node",
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "Scientific Debate", "onAutoForward": "notify" }
+  },
+  "postCreateCommand": "pnpm install --frozen-lockfile",
+  "postStartCommand": "bash .devcontainer/start-preview.sh"
+}
