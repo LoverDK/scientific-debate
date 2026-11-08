@@ -25,11 +25,7 @@ function PaperInfo({
   return (
     <div className="min-w-0">
       <p className="break-words font-medium">
-        {/^W\d+$/.test(paper.externalId) ? (
-          <a className="underline decoration-muted-foreground/40 underline-offset-4" href={`https://openalex.org/${paper.externalId}`} target="_blank" rel="noopener noreferrer">
-            {paper.title || paper.externalId}
-          </a>
-        ) : paper.title || paper.externalId}
+        {paper.title || paper.externalId}
       </p>
       <p className="text-sm text-muted-foreground">
         {[paper.authors.slice(0, 3).join(", "), paper.year, paper.externalId]
@@ -135,9 +131,8 @@ export function DebateEvidence({
         <div>
           <h2 className="text-xl font-semibold">Evidence</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            The Agent searches OpenAlex using the claim's concepts and alternative
-            terms, then checks relevance before judging support or opposition.
-              Newly auto-selected papers include a passage checked against their abstract.
+            The Agent searches OpenAlex for supportive and critical papers, then
+            labels stance with the free OpenRouter model (title/abstract only).
             You review the pack — you do not need to search and pick papers.
           </p>
         </div>
@@ -187,31 +182,12 @@ export function DebateEvidence({
         </div>
       )}
       {gather.isSuccess && (
-        <div className="space-y-2">
         <p role="status">
           Attached {gather.data.attached.supports.length} supporting,{" "}
           {gather.data.attached.opposes.length} opposing,{" "}
           {gather.data.attached.uncertain.length} uncertain via{" "}
           {gather.data.classifierModelId}. {gather.data.note}
         </p>
-        <details className="rounded-lg border p-3 text-sm">
-          <summary className="cursor-pointer font-medium">How evidence was selected</summary>
-          <p className="mt-2">Reviewed {gather.data.review.candidateCount} candidates; {gather.data.review.eligibleCount} passed relevance and excerpt checks; {gather.data.review.excludedCount} were excluded. At most 15 candidates are reviewed per pass. Existing attachments are kept.</p>
-          <p className="mt-2 text-muted-foreground">Search direction does not decide stance. A matching excerpt proves where the quoted text came from, not that the model's interpretation is correct. No opposing evidence is a valid outcome.</p>
-          <ul className="mt-2 space-y-2">
-            {gather.data.queries.executed.map(search => <li key={search.query} className="break-words">
-              <span className="font-medium">{search.kind}</span>: {search.query} ({search.resultCount} results)
-            </li>)}
-          </ul>
-          {gather.data.review.warnings.map(warning => <p key={warning} className="mt-2">{warning}</p>)}
-          {gather.data.review.excluded.length > 0 && <details className="mt-3">
-            <summary className="cursor-pointer">Excluded candidates</summary>
-            <ul className="mt-2 space-y-2">{gather.data.review.excluded.map(p => <li key={p.externalId}>
-              <strong>{p.title ?? p.externalId}</strong> · {p.reason}
-            </li>)}</ul>
-          </details>}
-        </details>
-        </div>
       )}
 
       {attached.isPending && <p role="status">Loading attached papers…</p>}

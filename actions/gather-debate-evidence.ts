@@ -1,5 +1,5 @@
 import { defineAction, fail } from "@agent-native/core/action";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { APICallError } from "ai";
 import { FREE_MODEL_RATE_LIMIT } from "../shared/debate-model.js";
@@ -20,8 +20,8 @@ import {
 } from "../server/lib/openalex-search.js";
 import type { OpenAlexMappedWork } from "../server/lib/openalex-works.js";
 import { rankPapersByKeywordCoverage } from "../server/lib/paper-keyword-rank.js";
+
 import { selectEvidenceCandidates } from "../server/lib/evidence-candidates.js";
-import { canAttachAssessedEvidence } from "../server/lib/evidence-assessment.js";
 
 const OPENALEX_SOURCE = "openalex" as const;
 const CANDIDATE_LIMIT = 15;
@@ -72,7 +72,7 @@ async function upsertPaperAndLink(options: {
       });
 
     const [paperRow] = await tx
-      .select({ id: papers.id, title: papers.title, abstract: papers.abstract })
+      .select({ id: papers.id })
       .from(papers)
       .where(
         and(
@@ -82,9 +82,6 @@ async function upsertPaperAndLink(options: {
       )
       .limit(1);
     if (!paperRow) fail("Failed to load paper after gather.", { statusCode: 500 });
-    if (paperRow.title !== options.paper.title || paperRow.abstract !== options.paper.abstract) {
-      fail("Paper metadata changed during assessment. Refresh evidence before gathering again.", { statusCode: 409 });
-    }
 
     const inserted = await tx
       .insert(debatePapers)
@@ -122,7 +119,7 @@ async function upsertPaperAndLink(options: {
 
 export default defineAction({
   description:
-    "Search OpenAlex with focused, synonym-expanded and challenging queries; assess relevance before stance using the free model. Automatically attach only relevant papers with a verified abstract excerpt. Unrelated or unverified candidates are excluded, never forced into opposing sides. Prefer after create-debate; no automatic model retries.",
+    "Agent-first evidence gathering: search OpenAlex for supportive and critical literature, then classify each paper's stance with the allowlisted free OpenRouter model (title/abstract only), and attach papers automatically. Prefer this over asking the user to search or pick papers. After create-debate, call gather-debate-evidence next. Requires OpenRouter to be connected; uses only the free allowlisted model.",
   schema: z.object({
     debateId: z.string().trim().min(1),
     searchTerms: z.string().trim().min(1).max(180).optional(),
@@ -146,29 +143,43 @@ export default defineAction({
 
     let supportHits: OpenAlexMappedWork[] = [];
     let opposeHits: OpenAlexMappedWork[] = [];
-    const searchesExecuted: { kind: string; query: string; resultCount: number }[] = [];
-    const searchWarnings: string[] = [];
     try {
-      // At most three distinct search queries, sequentially. A query's purpose
-      // never determines a paper's stance. No extra classifier calls for planning.
-      for (const search of queries.searches) {
-        if (searchesExecuted.length) await pauseBetweenOpenAlexCalls();
-        try {
-          const hits = await searchOpenAlexWorks({ query: search.query, bridgeQuery: queries.keywords.join(" "), page: 1, perPage: 10 });
-          searchesExecuted.push({ ...search, resultCount: hits.length });
-          if (search.kind === "challenging") opposeHits.push(...hits);
-          else supportHits.push(...hits);
-        } catch (error) {
-          if (search.kind === "expanded" && error instanceof OpenAlexSearchError && error.statusCode === 429 && (supportHits.length || opposeHits.length)) {
-            searchWarnings.push("The optional synonym search was rate limited; results cover the completed queries only.");
-            break;
-          }
+      // Sequential + polite-pool mailto: parallel bursts hit OpenAlex 429 easily.
+      const page1 = await searchOpenAlexWorks({
+        query: queries.supportQuery,
+        page: 1,
+        perPage: 10,
+      });
+      await pauseBetweenOpenAlexCalls();
+      const opposePage = await searchOpenAlexWorks({
+        query: queries.opposeQuery,
+        page: 1,
+        perPage: 10,
+      });
+      let page2: OpenAlexMappedWork[] = [];
+      try {
+        await pauseBetweenOpenAlexCalls();
+        page2 = await searchOpenAlexWorks({
+          query: queries.supportQuery,
+          page: 2,
+          perPage: 10,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof OpenAlexSearchError && error.statusCode === 429)
+        ) {
           throw error;
         }
+        // Page 2 is optional enrichment; keep going with page 1 + oppose hits.
       }
-      // Rank against the claim concepts, not boilerplate like limitation/failure.
-      supportHits = rankPapersByKeywordCoverage(supportHits, queries.keywords);
-      opposeHits = rankPapersByKeywordCoverage(opposeHits, queries.keywords);
+      supportHits = rankPapersByKeywordCoverage(
+        [...page1, ...page2],
+        queries.supportQuery,
+      );
+      opposeHits = rankPapersByKeywordCoverage(
+        opposePage,
+        queries.opposeQuery,
+      );
     } catch (error) {
       if (error instanceof OpenAlexSearchError) {
         if (error.statusCode === 429) {
@@ -184,24 +195,13 @@ export default defineAction({
       fail("OpenAlex network request failed.", { statusCode: 502 });
     }
 
-    let candidates = selectEvidenceCandidates(supportHits, opposeHits, CANDIDATE_LIMIT);
+    const candidates = selectEvidenceCandidates(supportHits, opposeHits, CANDIDATE_LIMIT);
     if (candidates.length === 0) {
       fail(
         "Literature search returned no usable papers. Try a paper title or shorter search terms below.",
         { statusCode: 404 },
       );
     }
-
-    // A cached paper is the record that will be attached and snapshotted. Assess
-    // that same title/abstract, rather than promising findings from newer text
-    // which ON CONFLICT DO NOTHING would not save.
-    const cached = await getDb().select({ externalId: schema.papers.externalId, title: schema.papers.title, abstract: schema.papers.abstract })
-      .from(schema.papers).where(and(eq(schema.papers.source, OPENALEX_SOURCE), inArray(schema.papers.externalId, candidates.map(p => p.externalId))));
-    const cacheById = new Map(cached.map(p => [p.externalId, p]));
-    candidates = candidates.map(p => {
-      const saved = cacheById.get(p.externalId);
-      return saved ? { ...p, title: saved.title, abstract: saved.abstract } : p;
-    });
 
     let classified;
     try {
@@ -232,17 +232,8 @@ export default defineAction({
       );
     }
 
-    const eligible = classified.classified.filter(p => canAttachAssessedEvidence(p) && p.title?.trim())
-      .sort((a, b) => Number(b.relevance === "direct") - Number(a.relevance === "direct"));
-    const rejected = classified.classified.filter(p => !eligible.includes(p));
-    if (eligible.length === 0) {
-      fail(classified.usedFallback
-        ? "No papers passed relevance and abstract-evidence checks because model assessment was incomplete. No new papers were attached."
-        : "No retrieved papers directly address the claim or provide usable background with abstract evidence. No new papers were attached.",
-      { statusCode: classified.usedFallback ? 502 : 422 });
-    }
     const pick = (stance: EvidenceStance) =>
-      eligible
+      classified.classified
         .filter((item) => item.stance === stance)
         .slice(0, maxPerStance);
 
@@ -266,7 +257,7 @@ export default defineAction({
         ownerEmail,
         paper,
         stance: paper.stance,
-        rationale: `${paper.relevance === "direct" ? "Directly relevant" : "Background only"}. ${paper.rationale}\nAbstract excerpt: "${paper.evidenceExcerpt}"\nAssessment uses metadata and the supplied abstract excerpt, not full text.`,
+        rationale: paper.rationale,
       });
       if (result === "created") attached.created += 1;
       else attached.updated += 1;
@@ -292,26 +283,17 @@ export default defineAction({
       debateId,
       claim: debate.claim,
       classifierModelId: FREE_EVIDENCE_CLASSIFIER_MODEL_ID,
-      // Retain the legacy response field without claiming heuristics ran.
       usedHeuristicFallback: false,
       hasUnclassifiedPapers: classified.usedFallback,
       queries: {
         supportQuery: queries.supportQuery,
         opposeQuery: queries.opposeQuery,
         keywords: queries.keywords,
-        executed: searchesExecuted,
-      },
-      review: {
-        candidateCount: candidates.length,
-        eligibleCount: eligible.length,
-        excludedCount: rejected.length,
-        excluded: rejected.map(p => ({ externalId: p.externalId, title: p.title, reason: p.rationale })),
-        warnings: searchWarnings,
       },
       attached,
       note: classified.usedFallback
-        ? "Some candidates were excluded because assessment could not be verified. Attached papers passed relevance and abstract-excerpt checks. Search direction is not stance; no full-text review was performed."
-        : "Attached papers passed relevance and abstract-excerpt checks. Background papers stay uncertain; supporting/opposing labels require direct relevance. These model judgments are not full-text peer review.",
+        ? "Some papers could not be classified and remain uncertain. Stance labels use the free OpenRouter model over title/abstract metadata only, not full text."
+        : "Stance labels come from the allowlisted free OpenRouter model over OpenAlex title/abstract metadata only — not full-text peer review.",
     };
   },
 });

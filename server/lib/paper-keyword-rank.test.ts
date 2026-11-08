@@ -66,24 +66,3 @@ describe("rankPapersByKeywordCoverage", () => {
     expect(ranked[0]?.externalId).toBe("W2");
   });
 });
-
-it("matches known concept aliases rather than requiring the acronym", () => {
-  const ranked = rankPapersByKeywordCoverage([
-    paper({ externalId: "W1", title: "Robustness in materials", relevanceScore: 999999 }),
-    paper({ externalId: "W2", title: "Robust reasoning in large language models", relevanceScore: 1 }),
-  ], ["llm", "robustness", "reasoning"]);
-  expect(ranked[0]?.externalId).toBe("W2");
-});
-
-it("does not count substrings such as reason inside unreasonable", () => {
-  const ranked = rankPapersByKeywordCoverage([
-    paper({ externalId: "W1", title: "Unreasonable concerns about robustness", relevanceScore: 1000 }),
-    paper({ externalId: "W2", title: "Models reason about robustness", relevanceScore: 1 }),
-  ], "reasoning robustness");
-  expect(ranked[0]?.externalId).toBe("W2");
-});
-
-it("deduplicates synonymous query concepts and ignores Boolean operators", () => {
-  const input = [paper({ externalId: "W1", title: "LLM", relevanceScore: 1000 }), paper({ externalId: "W2", title: "Robustness reasoning" })];
-  expect(rankPapersByKeywordCoverage(input, '(llm OR "large language model") AND robustness AND reasoning')[0]?.externalId).toBe("W2");
-});

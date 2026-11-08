@@ -2,7 +2,7 @@ import { closeDbExec, getDatabaseUrl, getMigrationDatabaseUrl, runMigrations, wi
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { getDb, schema } from "../server/db/index.js";
 import { debatesAppMigrations, DEBATES_APP_MIGRATIONS_TABLE } from "../server/db/migrations.js";
-import { searchOpenAlexWorks, OpenAlexSearchError } from "../server/lib/openalex-search.js";
+import { searchOpenAlexWorks } from "../server/lib/openalex-search.js";
 import { classifyPapersWithFreeOpenRouter } from "../server/lib/evidence-stance-llm.js";
 import type { OpenAlexMappedWork } from "../server/lib/openalex-works.js";
 import gather from "./gather-debate-evidence.js";
@@ -57,7 +57,7 @@ it("sends critical search hits to the classifier even when support hits fill the
     .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => paper(i + 11)));
   vi.mocked(classifyPapersWithFreeOpenRouter).mockImplementation(async ({ papers }) => ({
     // Search direction must never override the model's uncertain verdict.
-    classified: papers.map(p => ({ ...p, relevance: "contextual", evidenceExcerpt: p.abstract!, stance: "uncertain", rationale: "Related background only", classifier: "openrouter-free" })),
+    classified: papers.map(p => ({ ...p, stance: "uncertain", rationale: "Related background only", classifier: "openrouter-free" })),
     usedFallback: false, modelId: "offline-fixture",
   }));
   const result = await gather.run(args, owner);
@@ -65,14 +65,15 @@ it("sends critical search hits to the classifier even when support hits fill the
   expect(candidates).toHaveLength(15);
   expect(candidates.filter(p => Number(p.externalId.slice(1)) >= 101)).toHaveLength(7);
   expect(searchOpenAlexWorks).toHaveBeenCalledTimes(3);
-  expect(result.queries.executed.map(q => q.kind)).toEqual(["focused", "challenging", "expanded"]);
+  expect(vi.mocked(searchOpenAlexWorks).mock.calls.map(([q]) => q.page)).toEqual([1, 1, 2]);
+  expect(vi.mocked(searchOpenAlexWorks).mock.calls[0][0].query).toBe(vi.mocked(searchOpenAlexWorks).mock.calls[2][0].query);
   expect(result.attached.supports).toEqual([]);
   expect(result.attached.opposes).toEqual([]);
   expect(result.attached.uncertain).toHaveLength(2);
   const links = await getDb().select().from(schema.debatePapers);
   expect(links).toHaveLength(2);
   expect(links.every(link => link.stance === "uncertain")).toBe(true);
-  expect(links[0]?.stanceRationale).toContain("Abstract excerpt:");
+  expect(links[0]?.stanceRationale).toBe("Related background only");
 });
 
 it("rejects unauthenticated and foreign callers before search or classification", async () => {
@@ -98,63 +99,30 @@ it("does not write or leak raw model failures", async () => {
   expect(await getDb().select().from(schema.debatePapers)).toEqual([]);
 });
 
-it("excludes unrelated and unverified candidates and exposes the exclusion count", async () => {
-  vi.mocked(searchOpenAlexWorks).mockResolvedValue([paper(1), paper(2), paper(3)]);
-  vi.mocked(classifyPapersWithFreeOpenRouter).mockResolvedValue({ modelId: "offline-fixture", usedFallback: true, classified: [
-    { ...paper(1), relevance: "direct", stance: "opposes", rationale: "Direct test contradicts the claim", evidenceExcerpt: paper(1).abstract!, classifier: "openrouter-free" },
-    { ...paper(2), relevance: "irrelevant", stance: "uncertain", rationale: "Different research question", evidenceExcerpt: "", classifier: "openrouter-free" },
-    { ...paper(3), relevance: "unassessed", stance: "uncertain", rationale: "No verified assessment", evidenceExcerpt: "", classifier: "unclassified" },
-  ] });
-  const result = await gather.run(args, owner);
-  expect(result.review).toMatchObject({ candidateCount: 3, eligibleCount: 1, excludedCount: 2 });
-  expect(result.attached.opposes.map(p => p.externalId)).toEqual(["W1"]);
-  expect((await getDb().select().from(schema.papers)).map(p => p.externalId)).toEqual(["W1"]);
-});
-
-it.each(["irrelevant", "unassessed"] as const)("does not attach anything when all candidates are %s", async relevance => {
-  vi.mocked(searchOpenAlexWorks).mockResolvedValue([paper(1)]);
-  vi.mocked(classifyPapersWithFreeOpenRouter).mockResolvedValue({ modelId: "offline-fixture", usedFallback: relevance === "unassessed", classified: [
-    { ...paper(1), relevance, stance: "uncertain", rationale: "Excluded", evidenceExcerpt: "", classifier: "unclassified" },
-  ] });
-  await expect(gather.run(args, owner)).rejects.toMatchObject({ statusCode: relevance === "unassessed" ? 502 : 422 });
-  expect(await getDb().select().from(schema.papers)).toEqual([]);
-  expect(await getDb().select().from(schema.debatePapers)).toEqual([]);
-});
-
-it("assesses the cached abstract that will actually be used by the EvidencePack", async () => {
-  const db = getDb();
-  await db.insert(schema.papers).values({ id: "cached", source: "openalex", externalId: "W1", providerUrl: paper(1).providerUrl,
-    title: "Saved title", abstract: "Saved abstract, not the fresh search result." });
-  vi.mocked(searchOpenAlexWorks).mockResolvedValue([paper(1)]);
-  vi.mocked(classifyPapersWithFreeOpenRouter).mockImplementation(async ({ papers }) => ({ modelId: "offline-fixture", usedFallback: false,
-    classified: papers.map(p => ({ ...p, relevance: "contextual", stance: "uncertain", rationale: "Background", evidenceExcerpt: p.abstract!, classifier: "openrouter-free" })) }));
-  await gather.run(args, owner);
-  expect(vi.mocked(classifyPapersWithFreeOpenRouter).mock.calls[0][0].papers[0]).toMatchObject({ title: "Saved title", abstract: "Saved abstract, not the fresh search result." });
-  expect((await db.select().from(schema.debatePapers))[0]?.stanceRationale).toContain("Saved abstract, not the fresh search result.");
-});
-
-it("rejects metadata changed during classification before linking the paper", async () => {
-  vi.mocked(searchOpenAlexWorks).mockResolvedValue([paper(1)]);
-  vi.mocked(classifyPapersWithFreeOpenRouter).mockImplementation(async ({ papers }) => {
-    // Another request populated the shared paper cache while model work was pending.
-    await getDb().insert(schema.papers).values({ id: "concurrent", source: "openalex", externalId: "W1",
-      providerUrl: paper(1).providerUrl, title: paper(1).title, abstract: "Different cached text." });
-    return { modelId: "offline-fixture", usedFallback: false, classified: papers.map(p => ({ ...p,
-      relevance: "direct", stance: "supports", rationale: "Synthetic assessment", evidenceExcerpt: p.abstract!, classifier: "openrouter-free" })) };
+it("restores attachment of classified papers without relevance or excerpt fields", async () => {
+  const candidates = [{ ...paper(1), abstract: null }, paper(2)];
+  vi.mocked(searchOpenAlexWorks).mockResolvedValue(candidates);
+  vi.mocked(classifyPapersWithFreeOpenRouter).mockResolvedValue({
+    modelId: "offline-fixture", usedFallback: false,
+    classified: candidates.map((p, i) => ({ ...p, stance: i === 0 ? "uncertain" : "supports",
+      rationale: "Synthetic model assessment", classifier: "openrouter-free" })),
   });
-  await expect(gather.run(args, owner)).rejects.toMatchObject({ statusCode: 409 });
-  expect(await getDb().select().from(schema.debatePapers)).toEqual([]);
-  expect((await getDb().select().from(schema.papers))[0]?.abstract).toBe("Different cached text.");
+  const result = await gather.run(args, owner);
+  expect(result.attached.supports.map(p => p.externalId)).toEqual(["W2"]);
+  expect(result.attached.uncertain.map(p => p.externalId)).toEqual(["W1"]);
+  expect(await getDb().select().from(schema.papers)).toHaveLength(2);
+  expect(await getDb().select().from(schema.debatePapers)).toHaveLength(2);
 });
 
-it("discloses incomplete retrieval when only the optional expansion is rate limited", async () => {
-  vi.mocked(searchOpenAlexWorks).mockResolvedValueOnce([paper(1)]).mockResolvedValueOnce([])
-    .mockRejectedValueOnce(new OpenAlexSearchError("rate limited", 429));
-  vi.mocked(classifyPapersWithFreeOpenRouter).mockImplementation(async ({ papers }) => ({ modelId: "offline-fixture", usedFallback: false,
-    classified: papers.map(p => ({ ...p, relevance: "direct", stance: "supports", rationale: "Synthetic assessment", evidenceExcerpt: p.abstract!, classifier: "openrouter-free" })) }));
+it("keeps unclassified candidates visible as uncertain instead of discarding all results", async () => {
+  vi.mocked(searchOpenAlexWorks).mockResolvedValue([paper(1)]);
+  vi.mocked(classifyPapersWithFreeOpenRouter).mockResolvedValue({
+    modelId: "offline-fixture", usedFallback: true,
+    classified: [{ ...paper(1), stance: "uncertain", rationale: "Model assessment unavailable", classifier: "unclassified" }],
+  });
   const result = await gather.run(args, owner);
-  expect(result.queries.executed.map(q => q.kind)).toEqual(["focused", "challenging"]);
-  expect(result.review.warnings).toHaveLength(1);
-  expect(result.attached.supports).toHaveLength(1);
-  expect(searchOpenAlexWorks).toHaveBeenCalledTimes(3);
+  expect(result.hasUnclassifiedPapers).toBe(true);
+  expect(result.usedHeuristicFallback).toBe(false);
+  expect(result.attached.uncertain).toHaveLength(1);
+  expect((await getDb().select().from(schema.debatePapers))[0]?.stance).toBe("uncertain");
 });
