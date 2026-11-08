@@ -6,6 +6,7 @@ import { DEFAULT_DEBATE_RUN_MODEL_ID, FREE_MODEL_ROUTING } from "../shared/debat
 import add from "./add-run-discussion.js";
 import list from "./list-run-discussion.js";
 import reply from "./reply-run-discussion.js";
+import { sql } from "drizzle-orm";
 
 const mocks = vi.hoisted(() => ({ secret: vi.fn(), generate: vi.fn(), provider: vi.fn() }));
 vi.mock("@agent-native/core/server", () => ({ resolveSecretDetailed: mocks.secret }));
@@ -34,7 +35,11 @@ beforeEach(async () => {
   await db.insert(schema.debateMessages).values({ id: "m", runId: "r", role: "judge", payloadJson: JSON.stringify(output), citedExternalIdsJson: '["W1"]' });
   await db.insert(schema.debateRunDiscussion).values({ id: "n", runId: "r", authorEmail: owner.userEmail, kind: "challenge", role: "judge", body: "Does this establish causality?", createdAt: new Date().toISOString() });
 });
-afterEach(() => { expect(fetch).not.toHaveBeenCalled(); vi.unstubAllGlobals(); });
+afterEach(async () => {
+  await getDb().execute(sql`DROP TRIGGER IF EXISTS reject_reply_write ON debate_run_discussion`);
+  await getDb().execute(sql`DROP FUNCTION IF EXISTS reject_reply_write()`);
+  expect(fetch).not.toHaveBeenCalled(); vi.unstubAllGlobals();
+});
 afterAll(closeDbExec);
 
 it("persists a separate AI reply using the saved snapshot and leaves the verdict unchanged", async () => {
@@ -104,4 +109,35 @@ it.each(["provider", "citation", "schema"])("persists a safe failure for %s and 
   const saved = await list.run({ runId: "r" }, owner);
   expect(JSON.stringify(saved)).not.toMatch(/MOCK_SECRET|private prompt|raw response|W999/);
   expect(saved.notes).toHaveLength(2);
+});
+it("classifies unreadable stored context before Secret access or model invocation", async () => {
+  await getDb().update(schema.debateRuns).set({ evidenceSnapshotJson: "broken" });
+  await expect(reply.run(args, owner)).rejects.toMatchObject({ statusCode: 500, errorCode: "discussion_context_unavailable" });
+  expect(mocks.secret).not.toHaveBeenCalled(); expect(mocks.generate).not.toHaveBeenCalled();
+});
+it("sanitizes an unexpected Secret resolver rejection before claiming a reply", async () => {
+  mocks.secret.mockRejectedValue(new Error("MOCK_SECRET private prompt"));
+  await expect(reply.run(args, owner)).rejects.toMatchObject({ statusCode: 503, errorCode: "discussion_secret_unavailable" });
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect((await list.run({ runId: "r" }, owner)).notes).toHaveLength(1);
+});
+it.each(["INSERT", "UPDATE"] as const)("reports the actual failed %s stage without repeating the model", async operation => {
+  const db = getDb();
+  await db.execute(sql`CREATE FUNCTION reject_reply_write() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'MOCK_SECRET private SQL prompt'; END $$`);
+  // Fixed test-only DDL against the explicitly guarded memory DB.
+  await db.execute(sql.raw(`CREATE TRIGGER reject_reply_write BEFORE ${operation} ON debate_run_discussion
+    FOR EACH ROW WHEN (NEW.id LIKE 'ai-reply:%') EXECUTE FUNCTION reject_reply_write()`));
+  let failure: unknown;
+  try { await reply.run(args, owner); } catch (error) { failure = error; }
+  expect(failure).toMatchObject({ statusCode: 500, errorCode: operation === "INSERT" ? "discussion_claim_failed" : "discussion_persistence_unconfirmed" });
+  expect(String(failure)).not.toMatch(/MOCK_SECRET|private SQL|prompt/);
+  expect(mocks.generate).toHaveBeenCalledTimes(operation === "INSERT" ? 0 : 1);
+  const notes = (await list.run({ runId: "r" }, owner)).notes;
+  expect(notes).toHaveLength(operation === "INSERT" ? 1 : 2);
+  if (operation === "UPDATE") {
+    expect(notes.find(note => note.aiReply)?.aiReply?.status).toBe("pending");
+    expect((await reply.run(args, owner)).status).toBe("pending");
+    expect(mocks.generate).toHaveBeenCalledTimes(1);
+  }
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { callAction } from "@agent-native/core/client/use-action";
-import { submitDiscussionWithReply } from "./discussion-submit";
+import { requestSavedDiscussionReply, submitDiscussionWithReply } from "./discussion-submit";
+import { discussionReplyErrors } from "../../shared/discussion-reply";
 vi.mock("@agent-native/core/client/use-action", () => ({ callAction: vi.fn() }));
 const wire = vi.mocked(callAction);
 const input = { runId: "r", kind: "challenge" as const, role: "judge" as const, body: "Is this causal?" };
@@ -25,4 +26,19 @@ it("reports unconfirmed response without resaving, retrying or leaking raw error
   expect(result).toMatchObject({ savedId: "n", status: "unconfirmed" });
   expect(result.error).not.toContain("private provider response");
   expect(wire).toHaveBeenCalledTimes(2);
+});
+it.each(Object.entries(discussionReplyErrors))("uses the fixed safe message for %s, not the raw error", async (errorCode, message) => {
+  wire.mockRejectedValueOnce(Object.assign(new Error("SECRET private SQL prompt"), { errorCode }));
+  expect((await requestSavedDiscussionReply("r", "n")).error).toBe(message);
+  expect(wire).toHaveBeenCalledTimes(1);
+});
+it("does not misreport an unknown HTTP 500 as a confirmed persistence failure", async () => {
+  wire.mockImplementationOnce(async (_name, _input, options) => {
+    options?.onResponse?.(new Response(null, { status: 500 }));
+    throw new Error("SECRET private SQL prompt");
+  });
+  const result = await requestSavedDiscussionReply("r", "n");
+  expect(result.error).toContain("state is unknown");
+  expect(result.error).not.toMatch(/SECRET|SQL|prompt|confirm reply persistence/);
+  expect(wire).toHaveBeenCalledTimes(1);
 });
