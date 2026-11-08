@@ -33,7 +33,7 @@ Evidence gathering alternates the two ranked search directions before deduplicat
 
 For a saved result, use `get-debate-result({debateId, runId})` for the judge report or `get-debate-run({runId})` for cited arguments and recorded usage. Compare runs from the same debate by their saved claims and snapshots. On explicit request, `check-debate-model({})` reads the configured model's public listing and prices. The listing cannot establish available capacity.
 
-Use `list-run-discussion({runId})` for the owner's human contributions. On a user's request, use `add-run-discussion({runId, kind, body, role?, citedExternalId?})` to record a viewpoint, question, challenge, citation explanation request, or follow-up. Treat human notes as separate from published evidence and model output. Read back the saved note before reporting success.
+Use `list-run-discussion({runId})` for the owner's contributions and separately labelled AI replies. On a user's request, use `add-run-discussion({runId, kind, body, role?, citedExternalId?})` to save their contribution, then `reply-run-discussion({runId, contributionId})` to answer it with the fixed free model using only the saved snapshot and arguments. The UI's Save & get AI reply performs the same sequence automatically. Repeated reply requests read the existing pending/completed/failed row, never retry the model. Read back the saved result; a saved question is not proof of a completed AI reply. Do not start another debate or perform network research to answer a discussion. Human notes and AI replies are separate from published evidence and the original verdict. A process exit may leave a pending reply requiring inspection; do not blindly resubmit.
 
 ## Skills
 

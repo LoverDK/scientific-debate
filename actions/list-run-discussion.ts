@@ -2,6 +2,7 @@ import { defineAction, fail } from "@agent-native/core/action";
 import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, schema } from "../server/db/index.js";
+import { savedDiscussionReplySchema, type SavedDiscussionReply } from "../shared/discussion-reply.js";
 
 export default defineAction({
   description: "Read human contributions to an owned debate run, oldest first.",
@@ -16,6 +17,13 @@ export default defineAction({
       .leftJoin(notes,and(eq(notes.runId,runs.id),eq(notes.authorEmail,owner)))
       .where(and(eq(runs.id,runId),eq(debates.ownerEmail,owner))).orderBy(asc(notes.createdAt),asc(notes.id));
     if (!rows.length) fail("Debate run not found.", {statusCode:404});
-    return { runId, archived: Boolean(rows[0]!.archivedAt), notes: rows.flatMap(row => row.note ? [row.note] : []) };
+    return { runId, archived: Boolean(rows[0]!.archivedAt), notes: rows.flatMap<NonNullable<typeof rows[number]["note"]> & { aiReply: SavedDiscussionReply | null }>(row => {
+      if (!row.note) return [];
+      if (!row.note.id.startsWith("ai-reply:")) return [{ ...row.note, aiReply: null }];
+      try {
+        const reply = savedDiscussionReplySchema.parse(JSON.parse(row.note.body));
+        return [{ ...row.note, kind: "ai_reply", body: reply.answer, aiReply: reply }];
+      } catch { return fail("Stored AI reply could not be read.", { statusCode: 500 }); }
+    }) };
   },
 });

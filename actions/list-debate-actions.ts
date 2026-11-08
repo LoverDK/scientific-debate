@@ -24,6 +24,7 @@ export default defineAction({
     actions: [
       { name: "list-run-discussion", purpose: "Read human contributions on an owned run", write: false, retrySafe: true },
       { name: "add-run-discussion", purpose: "Save a human contribution alongside a run", write: true, retrySafe: false },
+      { name: "reply-run-discussion", purpose: "Generate one saved free-model reply to an owned contribution using its run snapshot; repeated calls read existing state", write: true, retrySafe: false },
       { name: "list-research-projects", purpose: "List owned research projects", write: false, retrySafe: true },
       { name: "create-research-project", purpose: "Create a research project", write: true, retrySafe: false },
       { name: "list-project-debates", purpose: "Read claims in an owned project", write: false, retrySafe: true },
