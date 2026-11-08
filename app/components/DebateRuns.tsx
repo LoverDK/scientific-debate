@@ -273,7 +273,7 @@ export function DebateRuns({
       refetchInterval: (query) =>
         sending ||
         cancelling ||
-        query.state.data?.runs.some((r) => isActive(r.status))
+        Boolean(query.state.data?.activeRunId)
           ? 4000
           : false,
     },
@@ -286,7 +286,7 @@ export function DebateRuns({
   const page = cursor ? older : history;
   const runs = page.data?.runs ?? [];
   const activeRunId = history.data?.activeRunId ?? null;
-  const active = history.data?.runs.some((r) => isActive(r.status));
+  const active = Boolean(activeRunId);
   const current = selected ?? activeRunId ?? runs[0]?.id;
 
   async function start() {
@@ -343,7 +343,7 @@ export function DebateRuns({
     try {
       await callAction("cancel-debate-run", { runId: target });
       setNotice(
-        "Cancelled the active run. You can start a new debate — the cancelled run stays in history.",
+        "Cancellation recorded. Saved messages remain in history. A model request already sent may still finish.",
       );
       setUncertain(false);
       await history.refetch();
@@ -366,10 +366,12 @@ export function DebateRuns({
         setNotice("Copied the run summary to the clipboard.");
       } else {
         const result = await exportDebateRun(current, format);
-        downloadExportedDebate(result);
+        const delivery = downloadExportedDebate(result);
         setNotice(
           format === "html"
-            ? "Opened a print-ready report — use Save as PDF in the print dialog."
+            ? delivery === "opened"
+              ? "Opened a print-ready report — use your browser's Print → Save as PDF."
+              : "Downloaded the HTML report because a new tab could not open. Open the file, then Print → Save as PDF."
             : `Downloaded ${format} export.`,
         );
       }

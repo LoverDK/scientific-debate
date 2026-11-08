@@ -57,8 +57,8 @@ export default function DebateConclusionRoute() {
         return { kind: "copy" as const };
       }
       const result = await exportDebateRun(runId, format);
-      downloadExportedDebate(result);
-      return { kind: format };
+      const delivery = downloadExportedDebate(result);
+      return { kind: format, delivery };
     },
   });
 
@@ -246,6 +246,13 @@ export default function DebateConclusionRoute() {
         )}
         {exportMutation.isSuccess && exportMutation.data.kind === "copy" && (
           <p role="status">Copied the run summary to the clipboard.</p>
+        )}
+        {exportMutation.isSuccess && exportMutation.data.kind === "html" && (
+          <p role="status">
+            {exportMutation.data.delivery === "opened"
+              ? "Opened a print-ready report. Use your browser's Print → Save as PDF."
+              : "Downloaded the HTML report because a new tab could not open. Open the file, then Print → Save as PDF."}
+          </p>
         )}
         {exportMutation.isError && (
           <p role="alert">Export failed. Try again after confirming the run.</p>

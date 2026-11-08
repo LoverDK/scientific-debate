@@ -6,6 +6,8 @@ import { getDb, schema } from "../server/db/index.js";
 import { roleUsageSchema, judgeOutputSchema, opponentOutputSchema, proponentOutputSchema } from "../server/lib/debate-llm.js";
 import { parseEvidenceSnapshot } from "../server/lib/debate-run.js";
 import { toSafeRunErrorSummary } from "../server/lib/safe-run-error.js";
+import { debateSnapshotSchema } from "../server/lib/debate-snapshot.js";
+import { validateCitedExternalIds } from "../server/lib/debate-evidence.js";
 
 const messageSchema = z.discriminatedUnion("role", [
   proponentOutputSchema, opponentOutputSchema, judgeOutputSchema,
@@ -29,7 +31,6 @@ export default defineAction({
       startedAt: runs.startedAt,
       finishedAt: runs.finishedAt,
       errorMessage: runs.errorMessage,
-      currentRunId: debates.currentRunId,
       evidenceSnapshotJson: runs.evidenceSnapshotJson,
       message: { id: messages.id, role: messages.role, payload: messages.payloadJson, usageJson: messages.usageJson },
     }).from(runs)
@@ -43,23 +44,33 @@ export default defineAction({
       evidenceSnapshotJson,
       message: _message,
       errorMessage,
-      currentRunId,
       ...run
     } = row;
     try {
+      const evidencePack = debateSnapshotSchema.parse(parseEvidenceSnapshot(evidenceSnapshotJson));
+      if (evidencePack.debateId !== run.debateId) throw new Error("Snapshot scope mismatch.");
+      const roleOrder = { proponent: 0, opponent: 1, judge: 2 };
       return {
         ...run,
         errorSummary: toSafeRunErrorSummary(errorMessage),
-        isActive:
-          (run.status === "queued" || run.status === "running") &&
-          run.id === currentRunId,
-        evidencePack: parseEvidenceSnapshot(evidenceSnapshotJson),
+        isActive: run.status === "queued" || run.status === "running",
+        evidencePack,
         messages: rows.flatMap(({ message }) => {
           if (!message) return [];
           const output = messageSchema.parse(JSON.parse(message.payload));
           if (output.role !== message.role) throw new Error("Role mismatch.");
+          validateCitedExternalIds(output.citedExternalIds, evidencePack);
+          const argumentIds = new Set<string>();
+          for (const argument of output.arguments) {
+            validateCitedExternalIds(argument.citedExternalIds, evidencePack);
+            argument.citedExternalIds.forEach(id => argumentIds.add(id));
+          }
+          const topIds = new Set(output.citedExternalIds);
+          if (topIds.size !== argumentIds.size || [...topIds].some(id => !argumentIds.has(id))) {
+            throw new Error("Citation mismatch.");
+          }
           return [{ id: message.id, role: output.role, output, usage: message.usageJson ? roleUsageSchema.parse(JSON.parse(message.usageJson)) : null }];
-        }),
+        }).sort((a, b) => roleOrder[a.role] - roleOrder[b.role]),
       };
     } catch {
       fail("Stored debate run data could not be read.", { statusCode: 500 });

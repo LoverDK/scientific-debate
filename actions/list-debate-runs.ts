@@ -1,5 +1,6 @@
 import { defineAction, fail } from "@agent-native/core/action";
-import { and, desc, eq, lt, or } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
 import { getDb, schema } from "../server/db/index.js";
@@ -30,6 +31,7 @@ export default defineAction({
   run: async ({ debateId, cursor }, ctx) => {
     const owner = ctx?.userEmail ?? fail("Sign in to view debate runs.", { statusCode: 401 });
     const { debates, debateRuns: runs } = schema;
+    const active = alias(runs, "active_run");
     const after = cursor === undefined ? undefined : decodeCursor(cursor, debateId);
     const older = after && or(
       lt(runs.createdAt, after.createdAt),
@@ -46,15 +48,16 @@ export default defineAction({
         finishedAt: runs.finishedAt,
         errorMessage: runs.errorMessage,
       },
-      currentRunId: debates.currentRunId,
+      activeRunId: active.id,
     }).from(debates)
+      .leftJoin(active, and(eq(active.debateId, debates.id), inArray(active.status, ["queued", "running"])))
       .leftJoin(runs, and(eq(runs.debateId, debates.id), older))
       .where(and(eq(debates.id, debateId), eq(debates.ownerEmail, owner)))
       .orderBy(desc(runs.createdAt), desc(runs.id))
       .limit(PAGE_SIZE + 1);
 
     if (!rows.length) fail("Debate not found.", { statusCode: 404 });
-    const activeRunId = rows[0]?.currentRunId ?? null;
+    const activeRunId = rows[0]?.activeRunId ?? null;
     const page = rows.slice(0, PAGE_SIZE).flatMap(({ run }) => {
       if (!run) return [];
       const { errorMessage, ...rest } = run;

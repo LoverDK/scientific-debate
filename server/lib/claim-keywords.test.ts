@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { extractClaimKeywords } from "./claim-keywords.js";
 
 describe("extractClaimKeywords", () => {
-  it("extracts non-overlapping phrases from an English claim", () => {
+  it("preserves scientific concepts and numeric population qualifiers", () => {
     const { keywords, query } = extractClaimKeywords(
       "Intermittent fasting improves insulin sensitivity in adults with type 2 diabetes",
     );
@@ -13,6 +13,7 @@ describe("extractClaimKeywords", () => {
     expect(keywords.some((k) => /fasting/i.test(k))).toBe(true);
     expect(query).not.toMatch(/\bimproves\b/);
     expect(query).not.toMatch(/\bwith\b/);
+    expect(query).toContain('"type 2 diabetes"');
     // No pair+single duplication like "insulin sensitivity insulin sensitivity".
     const lowered = query.toLowerCase();
     expect(lowered.indexOf("insulin")).toBe(lowered.lastIndexOf("insulin"));
@@ -27,7 +28,8 @@ describe("extractClaimKeywords", () => {
     );
     expect(query.toLowerCase()).toMatch(/robustness/);
     expect(query.toLowerCase()).toMatch(/reasoning/);
-    expect(query.toLowerCase()).toMatch(/llm|ability/);
+    expect(query.toLowerCase()).toContain("large language model");
+    expect(query).not.toContain('"robustness llm"');
     // Quoted phrases for multi-word terms.
     expect(query).toMatch(/"/);
   });
@@ -41,4 +43,20 @@ describe("extractClaimKeywords", () => {
     const { query } = extractClaimKeywords("CRISPR-Cas9 editing in HEK293 cells");
     expect(query.toLowerCase()).toMatch(/crispr/);
   });
+});
+
+it("keeps UI and server extraction identical", async () => {
+  const client = await import("../../app/lib/claim-keywords.js");
+  expect(client.extractClaimKeywords("LLM robustness improves reasoning"))
+    .toEqual(extractClaimKeywords("LLM robustness improves reasoning"));
+});
+
+it.each([
+  ["Adversarial training improves LLM reasoning", ["adversarial training", "large language model", "reasoning"]],
+  ["Chain-of-thought improves arithmetic reasoning", ["chain of thought", "arithmetic", "reasoning"]],
+  ["RAG reduces hallucinations in LLMs", ["retrieval augmented generation", "hallucinations", "large language model"]],
+  ["Adults with type 1 diabetes", ["adults", "type 1 diabetes"]],
+  ["大语言模型的鲁棒性可以提高推理能力", ["large language model", "robustness", "reasoning"]],
+])("extracts concepts from %s without inventing adjacent phrases", (claim, concepts) => {
+  expect(extractClaimKeywords(claim).keywords).toEqual(concepts);
 });

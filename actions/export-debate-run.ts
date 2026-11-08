@@ -1,17 +1,7 @@
 import { defineAction, fail } from "@agent-native/core/action";
 import { z } from "zod";
 import getRun from "./get-debate-run.js";
-
-const evidenceSchema = z.object({
-  claim: z.string(), debateId: z.string(),
-  papers: z.array(z.object({
-    id: z.string(), externalId: z.string(), title: z.string(),
-    authors: z.array(z.string()), year: z.number().nullable(),
-    doi: z.string().nullable(), url: z.string().nullable(), providerUrl: z.string(),
-    abstract: z.string().nullable(), abstractTruncated: z.boolean(),
-    stance: z.enum(["supports", "opposes", "uncertain"]).nullable().default(null),
-  })),
-});
+import { debateSnapshotSchema as evidenceSchema } from "../server/lib/debate-snapshot.js";
 
 function literal(text: string) {
   return text.split(/\r\n|[\r\n]/).map(line => "    " + line).join("\n");

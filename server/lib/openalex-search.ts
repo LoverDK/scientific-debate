@@ -357,6 +357,8 @@ async function searchViaCrossrefOpenAlexBridge(options: {
 /** Fetch one page of OpenAlex works for a free-text search query. */
 export async function searchOpenAlexWorks(options: {
   query: string;
+  /** Plain concept text for Crossref, which does not use OpenAlex Boolean syntax. */
+  bridgeQuery?: string;
   page?: number;
   perPage?: number;
   apiKey?: string | null;
@@ -384,7 +386,7 @@ export async function searchOpenAlexWorks(options: {
           "[openalex-search] Anonymous search paused; using Crossref→OpenAlex DOI bridge.",
         );
         return searchViaCrossrefOpenAlexBridge({
-          query: options.query,
+          query: options.bridgeQuery ?? options.query,
           page,
           perPage,
           apiKey,

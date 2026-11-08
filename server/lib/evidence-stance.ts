@@ -1,4 +1,5 @@
 import { extractClaimKeywords } from "./claim-keywords.js";
+import { buildConceptQuery } from "../../shared/research-terms.js";
 import type { OpenAlexMappedWork } from "./openalex-works.js";
 
 export type EvidenceStance = "supports" | "opposes" | "uncertain";
@@ -76,20 +77,27 @@ function keywordCoverage(text: string, keywords: string[]): number {
   return hits;
 }
 
-/** Build OpenAlex queries aimed at supportive vs critical literature. */
+/** Build focused, synonym-expanded and challenging queries; none assigns stance. */
 export function buildEvidenceSearchQueries(claim: string): {
   keywords: string[];
   supportQuery: string;
   opposeQuery: string;
+  searches: { kind: "focused" | "expanded" | "challenging"; query: string }[];
 } {
-  const { keywords } = extractClaimKeywords(claim);
-  // Adjacent extracted tokens can be separated by stopwords in the claim.
-  // Searching them as exact phrases excludes otherwise relevant abstracts.
-  const base = keywords.join(" ") || claim.trim().slice(0, 200);
+  const { keywords, query } = extractClaimKeywords(claim);
+  const base = buildConceptQuery(keywords, false, 200) || query.slice(0, 200);
+  const expanded = buildConceptQuery(keywords, true, 200) || base;
+  const opposing = `${expanded} AND (limitation OR failure OR critique OR "no improvement" OR "null result")`;
+  const searches: { kind: "focused" | "expanded" | "challenging"; query: string }[] = [
+    { kind: "focused", query: base },
+    { kind: "challenging", query: opposing },
+  ];
+  if (expanded !== base) searches.push({ kind: "expanded", query: expanded });
   return {
     keywords,
     supportQuery: base,
-    opposeQuery: `${base} (limitation OR failure OR critique OR "does not" OR ineffective OR controversy)`,
+    opposeQuery: opposing,
+    searches,
   };
 }
 

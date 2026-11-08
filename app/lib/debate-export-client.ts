@@ -22,7 +22,7 @@ export async function exportDebateRun(
   ) as Promise<ExportResult>;
 }
 
-export function downloadExportedDebate(result: ExportResult): void {
+export function downloadExportedDebate(result: ExportResult): "opened" | "downloaded" {
   if (result.format === "html" && result.html) {
     const blob = new Blob([result.html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -37,7 +37,7 @@ export function downloadExportedDebate(result: ExportResult): void {
       anchor.click();
     }
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    return;
+    return popup ? "opened" : "downloaded";
   }
 
   if (result.format === "json") {
@@ -49,8 +49,8 @@ export function downloadExportedDebate(result: ExportResult): void {
     anchor.href = url;
     anchor.download = `scientific-debate-${result.runId}.json`;
     anchor.click();
-    URL.revokeObjectURL(url);
-    return;
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    return "downloaded";
   }
 
   const blob = new Blob([result.markdown], {
@@ -61,7 +61,8 @@ export function downloadExportedDebate(result: ExportResult): void {
   anchor.href = url;
   anchor.download = `scientific-debate-${result.runId}.md`;
   anchor.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  return "downloaded";
 }
 
 export async function copyDebateSummary(runId: string): Promise<string> {

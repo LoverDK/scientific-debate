@@ -3,20 +3,8 @@ import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { getDb, schema } from "../server/db/index.js";
-import {
-  judgeOutputSchema,
-  opponentOutputSchema,
-  proponentOutputSchema,
-} from "../server/lib/debate-llm.js";
-import { toSafeRunErrorSummary } from "../server/lib/safe-run-error.js";
-import { parseEvidenceSnapshot } from "../server/lib/debate-run.js";
+import getRun from "./get-debate-run.js";
 import type { JudgeOutput } from "../server/lib/debate-llm.js";
-
-const messageSchema = z.discriminatedUnion("role", [
-  proponentOutputSchema,
-  opponentOutputSchema,
-  judgeOutputSchema,
-]);
 
 /**
  * Compact result view for Agents: prefer a specific runId, else latest completed,
@@ -35,7 +23,7 @@ export default defineAction({
     const owner =
       ctx?.userEmail ??
       fail("Sign in to view debate results.", { statusCode: 401 });
-    const { debates, debateRuns, debateMessages } = schema;
+    const { debates, debateRuns } = schema;
     const db = getDb();
 
     const [owned] = await db
@@ -83,13 +71,9 @@ export default defineAction({
       }
     }
 
-    const messageRows = await db
-      .select({
-        role: debateMessages.role,
-        payloadJson: debateMessages.payloadJson,
-      })
-      .from(debateMessages)
-      .where(eq(debateMessages.runId, runRow.id));
+    // Reuse the same owner, snapshot and citation validation as the inspector
+    // and exports. Corrupt stored messages must not silently disappear.
+    const run = await getRun.run({ runId: runRow.id }, ctx);
 
     const roles: {
       proponentSummary: string | null;
@@ -108,36 +92,30 @@ export default defineAction({
       judge: null,
     };
 
-    for (const row of messageRows) {
-      try {
-        const output = messageSchema.parse(JSON.parse(row.payloadJson));
-        if (output.role !== row.role) continue;
-        if (output.role === "proponent") roles.proponentSummary = output.summary;
-        if (output.role === "opponent") roles.opponentSummary = output.summary;
-        if (output.role === "judge") {
-          roles.judge = {
-            verdict: output.verdict,
-            confidence: output.confidence,
-            summary: output.summary,
-            limitations: output.limitations,
-            arguments: output.arguments,
-            researchNotes: output.researchNotes,
-          };
-        }
-      } catch {
-        // Skip corrupt payloads; get-debate-run remains the full inspector.
+    for (const { output } of run.messages) {
+      if (output.role === "proponent") roles.proponentSummary = output.summary;
+      if (output.role === "opponent") roles.opponentSummary = output.summary;
+      if (output.role === "judge") {
+        roles.judge = {
+          verdict: output.verdict,
+          confidence: output.confidence,
+          summary: output.summary,
+          limitations: output.limitations,
+          arguments: output.arguments,
+          researchNotes: output.researchNotes,
+        };
       }
     }
 
     return {
       debateId,
-      claim: parseEvidenceSnapshot(runRow.evidenceSnapshotJson).claim,
-      runId: runRow.id,
-      status: runRow.status,
-      modelId: runRow.modelId,
-      createdAt: runRow.createdAt,
-      finishedAt: runRow.finishedAt,
-      errorSummary: toSafeRunErrorSummary(runRow.errorMessage),
+      claim: run.evidencePack.claim,
+      runId: run.id,
+      status: run.status,
+      modelId: run.modelId,
+      createdAt: run.createdAt,
+      finishedAt: run.finishedAt,
+      errorSummary: run.errorSummary,
       ...roles,
     };
   },

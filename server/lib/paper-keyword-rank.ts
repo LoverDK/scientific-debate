@@ -1,88 +1,34 @@
 import type { OpenAlexMappedWork } from "./openalex-works.js";
+import { containsResearchTerm, normalizeResearchText, researchAliases } from "../../shared/research-terms.js";
 
-/** Lightweight token forms for near-match scoring (no NLP dependency). */
+/** Explicit aliases plus conservative inflections, not arbitrary substring similarity. */
 export function keywordVariants(term: string): string[] {
-  const base = term
-    .toLowerCase()
-    .replace(/^"+|"+$/g, "")
-    .trim();
-  if (!base) return [];
-  const parts = base.split(/\s+/).filter(Boolean);
-  const variants = new Set<string>([base, ...parts]);
-  for (const part of parts) {
-    if (part.length < 4) continue;
-    if (part.endsWith("ing") && part.length > 5) variants.add(part.slice(0, -3));
-    if (part.endsWith("ed") && part.length > 4) variants.add(part.slice(0, -2));
-    if (part.endsWith("s") && !part.endsWith("ss") && part.length > 3) {
-      variants.add(part.slice(0, -1));
-    }
-    if (part.endsWith("ies") && part.length > 4) {
-      variants.add(`${part.slice(0, -3)}y`);
-    }
+  const variants = new Set(researchAliases(term));
+  for (const base of [...variants]) {
+    if (base.includes(" ")) continue;
+    if (base.endsWith("ing") && base.length > 5) variants.add(base.slice(0, -3));
+    if (base.endsWith("ies") && base.length > 4) variants.add(`${base.slice(0, -3)}y`);
+    else if (base.endsWith("s") && !base.endsWith("ss") && base.length > 3) variants.add(base.slice(0, -1));
   }
   return [...variants];
 }
 
-function haystackOf(paper: OpenAlexMappedWork): string {
-  return [paper.title ?? "", paper.abstract ?? ""]
-    .join("\n")
-    .toLowerCase();
-}
-
-/**
- * Rank papers so those covering more query phrases/tokens rise first.
- * Secondary key: OpenAlex relevanceScore.
- */
-export function rankPapersByKeywordCoverage(
-  papers: OpenAlexMappedWork[],
-  query: string,
-): OpenAlexMappedWork[] {
-  const phrases = query
-    .match(/"[^"]+"|[^\s"]+/g)
-    ?.map((part) => part.replace(/^"+|"+$/g, "").trim().toLowerCase())
-    .filter((part) => part.length > 0) ?? [];
-
-  if (phrases.length === 0) return papers;
-
-  const phraseVariants = phrases.map((phrase) => ({
-    phrase,
-    variants: keywordVariants(phrase),
-  }));
-
+/** Rank by concept coverage first, title coverage second, upstream score last. */
+export function rankPapersByKeywordCoverage(papers: OpenAlexMappedWork[], query: string | readonly string[]): OpenAlexMappedWork[] {
+  const terms = typeof query === "string"
+    ? (query.match(/"[^"]+"|[^\s"()]+/g) ?? []).filter(term => !["AND", "OR", "NOT"].includes(term))
+    : query;
+  const groups = [...new Map(terms.map(term => {
+    const variants = keywordVariants(normalizeResearchText(term));
+    return [[...variants].sort().join("|"), variants] as const;
+  })).values()].filter(group => group.some(Boolean));
   const scored = papers.map((paper, index) => {
-    const hay = haystackOf(paper);
-    let exactPhrases = 0;
-    let nearTokens = 0;
-    for (const { phrase, variants } of phraseVariants) {
-      if (hay.includes(phrase)) {
-        exactPhrases += 1;
-        continue;
-      }
-      let near = false;
-      for (const variant of variants) {
-        if (variant === phrase) continue;
-        if (variant.length >= 3 && hay.includes(variant)) {
-          near = true;
-          break;
-        }
-      }
-      if (near) nearTokens += 1;
-    }
-    const coverageRatio = exactPhrases / phraseVariants.length;
-    const nearRatio = nearTokens / phraseVariants.length;
-    const relevance = paper.relevanceScore ?? 0;
-    const score =
-      exactPhrases * 100 +
-      nearTokens * 25 +
-      coverageRatio * 40 +
-      nearRatio * 10 +
-      relevance;
-    return { paper, score, index };
+    const title = normalizeResearchText(paper.title ?? "");
+    const text = `${title} ${normalizeResearchText(paper.abstract ?? "")}`;
+    const covers = (haystack: string) => groups.filter(group => group.some(term => containsResearchTerm(haystack, term))).length;
+    return { paper, index, coverage: covers(text), titleCoverage: covers(title) };
   });
-
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.index - b.index;
-  });
-  return scored.map((entry) => entry.paper);
+  scored.sort((a, b) => b.coverage - a.coverage || b.titleCoverage - a.titleCoverage ||
+    (b.paper.relevanceScore ?? 0) - (a.paper.relevanceScore ?? 0) || a.index - b.index);
+  return scored.map(item => item.paper);
 }
